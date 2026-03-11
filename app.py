@@ -25,15 +25,13 @@ def load_all_data():
     
     df_inv = pd.DataFrame(rows, columns=headers)
     
-    # Nettoyage des colonnes fantômes
+    # Nettoyage
     df_inv = df_inv.loc[:, df_inv.columns.str.len() > 0]
     df_inv = df_inv.loc[:, ~df_inv.columns.str.contains('^Unnamed')]
     
-    # Sécurité No_Serie : Si la colonne n'existe pas, on la crée pour éviter le crash
     if "No_Serie" not in df_inv.columns:
         df_inv["No_Serie"] = "N/A"
 
-    # On ne garde que les vrais items
     df_inv = df_inv[df_inv["Marque_Modele"].astype(str).str.strip() != ""]
     
     for col in ["Derniere_Inspection", "Date_Achat"]:
@@ -80,14 +78,12 @@ with st.sidebar:
                 st.cache_data.clear()
                 st.rerun()
 
-# --- INTERFACE PRINCIPALE (EN HAUT) ---
+# --- INTERFACE PRINCIPALE ---
 st.title("🛠️ Gestion EPI - JD")
 
-# Liste pour le sélecteur
 df["Label"] = df["No_Serie"].astype(str) + " | " + df["Marque_Modele"].astype(str)
 list_sn = df["No_Serie"].tolist()
 
-# Scan NFC
 query_params = st.query_params
 scan_id = query_params.get("id")
 default_idx = list_sn.index(scan_id) if scan_id in list_sn else None
@@ -120,7 +116,7 @@ if selected_sn:
         with st.form("insp_form"):
             res_insp = st.radio("Résultat", ["✅ PASS", "⚠️ À SURVEILLER", "❌ FAIL"], horizontal=True)
             obs = st.text_area("Observations")
-            photo = st.camera_input("Photo (Optionnelle)")
+            photo = st.camera_input("Photo")
             if st.form_submit_button("Enregistrer", type="primary", use_container_width=True):
                 img_b64 = ""
                 if photo:
@@ -138,14 +134,34 @@ if selected_sn:
                 st.rerun()
 
     with tab3:
-        st.dataframe(data['h_loc'][data['h_loc']["No_Serie"] == selected_sn], hide_index=True, use_container_width=True)
-        st.dataframe(data['h_insp'][data['h_insp']["No_Serie"] == selected_sn], hide_index=True, use_container_width=True)
+        st.subheader("Historique Localisation")
+        st.dataframe(data['h_loc'][data['h_loc']["No_Serie"].astype(str) == str(selected_sn)], hide_index=True)
+        st.subheader("Historique Inspections")
+        st.dataframe(data['h_insp'][data['h_insp']["No_Serie"].astype(str) == str(selected_sn)], hide_index=True)
 
-# --- DASHBOARD (EN BAS) ---
+# --- DASHBOARD AVEC FILTRES (EN BAS) ---
 st.markdown("---")
-st.subheader("📊 Aperçu global")
-c1, c2, c3 = st.columns(3)
-c1.metric("Total Items", len(df))
-# On utilise str.contains pour être flexible sur les majuscules
-c2.metric("⚠️ À inspecter", len(df[df["Statut_Actuel"].str.contains("inspecter", case=False, na=False)]))
-c3.metric("✅ En service", len(df[df["Statut_Actuel"].str.contains("service", case=False, na=False)]))
+st.header("📊 Inventaire Complet")
+
+# Zone de filtres
+col_f1, col_f2 = st.columns([2, 1])
+with col_f1:
+    cat_filter = st.multiselect("Filtrer par Catégorie", options=sorted(df["Categorie"].unique().tolist()))
+with col_f2:
+    statut_filter = st.multiselect("Filtrer par Statut", options=sorted(df["Statut_Actuel"].unique().tolist()))
+
+# Application des filtres
+df_filtered = df.copy()
+if cat_filter:
+    df_filtered = df_filtered[df_filtered["Categorie"].isin(cat_filter)]
+if statut_filter:
+    df_filtered = df_filtered[df_filtered["Statut_Actuel"].isin(statut_filter)]
+
+# Métriques du Dashboard
+m1, m2, m3 = st.columns(3)
+m1.metric("Items affichés", len(df_filtered))
+m2.metric("⚠️ À inspecter", len(df_filtered[df_filtered["Statut_Actuel"].str.contains("inspecter", case=False, na=False)]))
+m3.metric("✅ En service", len(df_filtered[df_filtered["Statut_Actuel"].str.contains("service", case=False, na=False)]))
+
+# Affichage du tableau d'inventaire
+st.dataframe(df_filtered.drop(columns=["Label", "Display_Label"], errors="ignore"), hide_index=True, use_container_width=True)

@@ -20,28 +20,41 @@ def clean_date(val):
 @st.cache_data(ttl=2)
 def load_all_data():
     res = requests.get(API_URL).json()
-    # Inventaire : On ignore les lignes vides (colonne A vide)
-    df_inv = pd.DataFrame(res['inventaire'][1:], columns=res['inventaire'][0])
-    df_inv = df_inv[df_inv["Marque_Modele"].str.strip() != ""]
-    # Suppression des colonnes fantômes
-    df_inv = df_inv.loc[:, [c for c in df_inv.columns if c and not c.startswith('Unnamed')]]
+    # On récupère les titres et les données
+    headers = res['inventaire'][0]
+    rows = res['inventaire'][1:]
+    
+    # Création du DataFrame
+    df_inv = pd.DataFrame(rows, columns=headers)
+    
+    # NETTOYAGE : Supprime les colonnes vides ou sans nom
+    df_inv = df_inv.loc[:, df_inv.columns.str.len() > 0]
+    df_inv = df_inv.loc[:, ~df_inv.columns.str.contains('^Unnamed')]
+    
+    # On s'assure que les colonnes essentielles existent, sinon on les crée vides
+    for col in ["No_Serie", "Marque_Modele", "Statut_Actuel", "Emplacement_Actuel"]:
+        if col not in df_inv.columns:
+            st.error(f"⚠️ La colonne '{col}' est absente de ton onglet Inventaire.")
+            df_inv[col] = "N/A"
+
+    # Filtrage des lignes vides
+    df_inv = df_inv[df_inv["Marque_Modele"].astype(str).str.strip() != ""]
     
     # Formatage des dates
     for col in ["Derniere_Inspection", "Date_Achat"]:
         if col in df_inv.columns: 
             df_inv[col] = df_inv[col].apply(clean_date)
     
-    # Config
+    # Config et Historiques
     df_conf = pd.DataFrame(res['config'][1:], columns=res['config'][0])
     
     return {
         "inv": df_inv,
-        "lieux": df_conf["Lieux"].dropna().unique().tolist(),
+        "lieux": df_conf["Lieux"].dropna().unique().tolist() if "Lieux" in df_conf.columns else [],
         "categories": df_conf["Categories"].dropna().unique().tolist() if "Categories" in df_conf.columns else [],
         "h_loc": pd.DataFrame(res['hist_loc'][1:], columns=res['hist_loc'][0]),
         "h_insp": pd.DataFrame(res['hist_insp'][1:], columns=res['hist_insp'][0])
     }
-
 # --- CHARGEMENT ---
 try:
     data = load_all_data()

@@ -7,7 +7,7 @@ from PIL import Image
 import io
 
 # --- CONFIGURATION ---
-API_URL = "https://script.google.com/macros/s/AKfycbzzZvhMHJGVU267o7eIqHpmeI5z-ThItEXIbMjLg8c-7YxLvB4ryQ0fCXLEfpTEEsbDFQ/exec"
+API_URL = "https://script.google.com/macros/s/AKfycbzKcjaspmJPPAuTfV5KJ1nJOuG4MeQICEtAk1nTV8wS5H67vpNhDnBWVwAhJx3d7egXJQ/exec"
 MON_NOM = "JD"
 
 st.set_page_config(page_title="Rigger EPI - JD", layout="centered", page_icon="🛠️")

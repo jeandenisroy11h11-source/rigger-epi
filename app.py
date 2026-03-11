@@ -6,124 +6,169 @@ import base64
 from PIL import Image
 import io
 
+# --- CONFIGURATION ---
 API_URL = "https://script.google.com/macros/s/AKfycbzzZvhMHJGVU267o7eIqHpmeI5z-ThItEXIbMjLg8c-7YxLvB4ryQ0fCXLEfpTEEsbDFQ/exec"
 MON_NOM = "JD"
 
-st.set_page_config(page_title="Rigger EPI - JD", layout="centered")
+st.set_page_config(page_title="Rigger EPI - JD", layout="centered", page_icon="🛠️")
+
+# --- FONCTIONS UTILES ---
+def clean_date(val):
+    s = str(val)
+    return s[:10] if len(s) >= 10 and s[0].isdigit() else s
 
 @st.cache_data(ttl=2)
-def load_data():
-    res = requests.get(API_URL)
-    data = res.json()
+def load_all_data():
+    res = requests.get(API_URL).json()
+    # Inventaire : On ignore les lignes vides (colonne A vide)
+    df_inv = pd.DataFrame(res['inventaire'][1:], columns=res['inventaire'][0])
+    df_inv = df_inv[df_inv["Marque_Modele"].str.strip() != ""]
+    # Suppression des colonnes fantômes
+    df_inv = df_inv.loc[:, [c for c in df_inv.columns if c and not c.startswith('Unnamed')]]
     
-    # 1. Création du DataFrame initial
-    full_df = pd.DataFrame(data[1:], columns=data[0])
+    # Formatage des dates
+    for col in ["Derniere_Inspection", "Date_Achat"]:
+        if col in df_inv.columns: 
+            df_inv[col] = df_inv[col].apply(clean_date)
     
-    # 2. SUPPRESSION DES COLONNES SANS NOM (doublons vides)
-    # On ne garde que les colonnes dont le nom n'est pas vide et n'est pas None
-    full_df = full_df.loc[:, [c for c in full_df.columns if c and not c.startswith('Unnamed')]]
+    # Config
+    df_conf = pd.DataFrame(res['config'][1:], columns=res['config'][0])
     
-    # 3. NETTOYAGE DES LIGNES : On ne garde que là où il y a un item
-    return full_df[full_df["Marque_Modele"].str.strip() != ""]
+    return {
+        "inv": df_inv,
+        "lieux": df_conf["Lieux"].dropna().unique().tolist(),
+        "categories": df_conf["Categories"].dropna().unique().tolist() if "Categories" in df_conf.columns else [],
+        "h_loc": pd.DataFrame(res['hist_loc'][1:], columns=res['hist_loc'][0]),
+        "h_insp": pd.DataFrame(res['hist_insp'][1:], columns=res['hist_insp'][0])
+    }
 
-df = load_data()
+# --- CHARGEMENT ---
+try:
+    data = load_all_data()
+    df = data['inv']
+except Exception as e:
+    st.error(f"Erreur de connexion : {e}")
+    st.stop()
 
-# --- RÉCUPÉRATION DES LISTES ---
-# On récupère les lieux uniques déjà utilisés + une option vide
-lieux_existants = sorted(df["Emplacement_Actuel"].unique().tolist())
-categories = sorted(df["Categorie"].unique().tolist()) if "Categorie" in df.columns else []
+# --- BARRE LATÉRALE (AJOUT ITEM AVEC NO_SERIE) ---
+with st.sidebar:
+    st.header("➕ Nouvel Item")
+    with st.form("add_item", clear_on_submit=True):
+        n_serie = st.text_input("Numéro de Série (Unique)")
+        n_id = st.text_input("Marque / Modèle")
+        n_cat = st.selectbox("Catégorie", data['categories'])
+        n_date = st.date_input("Date d'achat", datetime.now())
+        n_vie = st.number_input("Vie utile (ans)", 10)
+        n_lieu = st.selectbox("Lieu initial", data['lieux'])
+        
+        if st.form_submit_button("Créer l'item", use_container_width=True):
+            if n_serie and n_id:
+                payload = {
+                    "Action": "AJOUT_ITEM", 
+                    "No_Serie": n_serie,
+                    "Marque_Modele": n_id, 
+                    "Categorie": n_cat, 
+                    "Date_Achat": str(n_date), 
+                    "Duree_Vie_Ans": n_vie, 
+                    "Nouveau_Lieu": n_lieu,
+                    "Derniere_Inspection": "" 
+                }
+                requests.post(API_URL, json=payload)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.warning("Le No de Série et le Modèle sont obligatoires.")
 
+# --- INTERFACE PRINCIPALE ---
 st.title("🛠️ Gestion EPI - JD")
 
-# --- DASHBOARD & FILTRES ---
-with st.expander("📊 Aperçu de l'inventaire", expanded=False):
-    # Sécurité pour les catégories
-    if "Categorie" in df.columns:
-        categories = sorted(df["Categorie"].unique().tolist())
-        cat_filter = st.multiselect("Filtrer par catégorie", categories)
-        temp_df = df[df["Categorie"].isin(cat_filter)] if cat_filter else df
-    else:
-        temp_df = df
+# Préparation de la liste pour le sélecteur (No_Serie comme identifiant)
+df["Display_Label"] = df["No_Serie"].astype(str) + " | " + df["Marque_Modele"].astype(str)
+list_no_serie = df["No_Serie"].tolist()
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total", len(temp_df))
-    # On gère le cas où "Statut_Actuel" pourrait avoir des espaces
-    a_inspecter = len(temp_df[temp_df["Statut_Actuel"].str.contains("inspecter", case=False, na=False)])
-    en_service = len(temp_df[temp_df["Statut_Actuel"].str.contains("service", case=False, na=False)])
+# Détection automatique du scan NFC (via URL ?id=SN123)
+query_params = st.query_params
+scan_id = query_params.get("id")
+default_idx = list_no_serie.index(scan_id) if scan_id in list_no_serie else None
+
+selected_no_serie = st.selectbox(
+    "Scanner ou Sélectionner l'item", 
+    list_no_serie, 
+    index=default_idx,
+    format_func=lambda x: df[df["No_Serie"] == x]["Display_Label"].iloc[0]
+)
+
+if selected_no_serie:
+    row = df[df["No_Serie"] == selected_no_serie].iloc[0]
+    item_nom = row["Marque_Modele"]
     
-    c1.metric("Total Items", len(temp_df))
-    c2.metric("⚠️ À inspecter", a_inspecter)
-    c3.metric("✅ En service", en_service)
-    
-    st.dataframe(temp_df, hide_index=True, use_container_width=True)
-
-st.divider()
-
-# --- SÉLECTION DE L'ITEM ---
-item_list = df["Marque_Modele"].tolist()
-selected_item = st.selectbox("Scanner / Choisir l'item", item_list, index=None, placeholder="En attente...")
-
-if selected_item:
-    row = df[df["Marque_Modele"] == selected_item].iloc[0]
-    lieu_actuel = str(row["Emplacement_Actuel"])
-    # NETTOYAGE DATE : on prend juste les 10 premiers caractères (AAAA-MM-JJ)
-    derniere_insp_brute = str(row["Derniere_Inspection"])
-    derniere_insp = derniere_insp_brute[:10] if len(derniere_insp_brute) >= 10 else "N/A"
-    
-    tab1, tab2 = st.tabs(["📦 Mouvement", "📋 Inspection"])
+    tab1, tab2, tab3 = st.tabs(["📦 Mouvement", "📋 Inspection", "📜 Historique"])
 
     with tab1:
-        st.info(f"📍 Lieu actuel : **{lieu_actuel}**")
+        st.info(f"📍 Lieu actuel : **{row['Emplacement_Actuel']}**")
         with st.form("move_form"):
-            mode_lieu = st.radio("Mode de destination", ["Liste existante", "Saisie manuelle"], horizontal=True)
+            dest_choice = st.selectbox("Destination", data['lieux'] + ["+ Nouveau lieu"])
+            nouveau_nom = st.text_input("Si nouveau, nom du lieu :")
+            final_dest = nouveau_nom if dest_choice == "+ Nouveau lieu" else dest_choice
             
-            if mode_lieu == "Liste existante":
-                dest = st.selectbox("Sélectionner le lieu", lieux_existants)
-            else:
-                dest = st.text_input("Saisir le nouveau lieu (ex: Location Client X)")
-            
-            if st.form_submit_button("Confirmer le transfert", type="primary", use_container_width=True):
-                if dest:
-                    payload = {
-                        "Action": "MOUVEMENT",
-                        "Marque_Modele": selected_item,
-                        "Ancien_Lieu": lieu_actuel,
-                        "Nouveau_Lieu": dest,
-                        "Derniere_Inspection": derniere_insp,
-                        "Inspecteur": MON_NOM
-                    }
-                    requests.post(API_URL, json=payload)
-                    st.success(f"Déplacé vers {dest}")
-                    st.cache_data.clear()
-                    st.rerun()
+            if st.form_submit_button("Confirmer le déplacement", type="primary", use_container_width=True):
+                payload = {
+                    "Action": "MOUVEMENT", 
+                    "Marque_Modele": item_nom, 
+                    "No_Serie": selected_no_serie, # Identifiant pour le script
+                    "Ancien_Lieu": row['Emplacement_Actuel'],
+                    "Nouveau_Lieu": final_dest, 
+                    "Derniere_Inspection": row['Derniere_Inspection'], 
+                    "Inspecteur": MON_NOM
+                }
+                requests.post(API_URL, json=payload)
+                st.cache_data.clear()
+                st.rerun()
 
     with tab2:
-        st.warning(f"🗓️ Dernière insp. : {derniere_insp}")
+        st.warning(f"🗓️ Dernière insp. : {row['Derniere_Inspection']}")
         with st.form("insp_form"):
-            resultat = st.radio("Résultat", ["✅ PASS", "⚠️ À SURVEILLER", "❌ FAIL"], horizontal=True)
-            obs = st.text_area("Observations", placeholder="État général, hernies, usure...")
-            photo_file = st.camera_input("Photo (Optionnel)")
+            res_insp = st.radio("Résultat", ["✅ PASS", "⚠️ À SURVEILLER", "❌ FAIL"], horizontal=True)
+            obs = st.text_area("Observations")
+            photo = st.camera_input("Photo")
             
             if st.form_submit_button("Enregistrer l'inspection", type="primary", use_container_width=True):
                 photo_b64 = ""
-                if photo_file:
-                    img = Image.open(photo_file)
-                    img.thumbnail((400, 400))
-                    buffered = io.BytesIO()
-                    img.save(buffered, format="JPEG", quality=70)
-                    photo_b64 = base64.b64encode(buffered.getvalue()).decode()
-
+                if photo:
+                    img = Image.open(photo); img.thumbnail((400, 400))
+                    buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
+                    photo_b64 = base64.b64encode(buf.getvalue()).decode()
+                
                 payload = {
-                    "Action": "INSPECTION",
-                    "Marque_Modele": selected_item,
-                    "Nouveau_Lieu": lieu_actuel,
-                    "Derniere_Inspection": datetime.now().strftime("%Y-%m-%d"),
+                    "Action": "INSPECTION", 
+                    "Marque_Modele": item_nom, 
+                    "No_Serie": selected_no_serie,
+                    "Nouveau_Lieu": row['Emplacement_Actuel'],
+                    "Derniere_Inspection": datetime.now().strftime("%Y-%m-%d"), 
                     "Inspecteur": MON_NOM,
-                    "Resultat": resultat,
-                    "Observations": obs,
+                    "Resultat": res_insp, 
+                    "Observations": obs, 
                     "Photo": photo_b64
                 }
                 requests.post(API_URL, json=payload)
-                st.success("Inspection enregistrée !")
                 st.cache_data.clear()
                 st.rerun()
+
+    with tab3:
+        st.subheader("Historique de l'item")
+        # Filtrage des historiques par Marque_Modele OU No_Serie selon comment tu as rempli tes feuilles
+        st.write("**Déplacements**")
+        h_loc_item = data['h_loc'][data['h_loc']["Marque_Modele"].astype(str).isin([str(item_nom), str(selected_no_serie)])]
+        st.dataframe(h_loc_item, hide_index=True, use_container_width=True)
+        
+        st.write("**Inspections**")
+        h_insp_item = data['h_insp'][data['h_insp']["Marque_Modele"].astype(str).isin([str(item_nom), str(selected_no_serie)])]
+        st.dataframe(h_insp_item, hide_index=True, use_container_width=True)
+
+# --- DASHBOARD ---
+st.divider()
+st.subheader("📊 État de l'inventaire")
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Items", len(df))
+c2.metric("⚠️ À inspecter", len(df[df["Statut_Actuel"].str.contains("inspecter", case=False, na=False)]))
+c3.metric("✅ En service", len(df[df["Statut_Actuel"].str.contains("service", case=False, na=False)]))
